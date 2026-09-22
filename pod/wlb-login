@@ -1,0 +1,64 @@
+#!/bin/sh
+# wlb-login — вход в аккаунты платформ через GUI-Creator внутри пода.
+#
+#   kubectl -n whitelist-bypass exec whitelist-bypass-N -- wlb-login
+#   kubectl -n whitelist-bypass port-forward pod/whitelist-bypass-N 6080
+#   браузер: http://localhost:6080/vnc.html
+#   в Creator: «+» → платформа → Create new → логин; куки лягут на PVC пода
+#   kubectl -n whitelist-bypass exec whitelist-bypass-N -- wlb-login stop
+#
+# noVNC и VNC слушают только localhost пода: снаружи их видно лишь через
+# port-forward. Пока вход идёт, агент не запускает новые creator'ы.
+set -eu
+
+RUN=/tmp/wlb-login
+DISPLAY_NUM=:99
+
+stop() {
+    for name in creator websockify x11vnc xvfb; do
+        pidfile="$RUN/$name.pid"
+        [ -f "$pidfile" ] || continue
+        pid=$(cat "$pidfile")
+        # отрицательный pid — вся группа процесса (Electron плодит детей)
+        kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+        rm -f "$pidfile"
+    done
+    rm -f "$RUN/active"
+    echo "вход закрыт, агент подхватит куки в течение 5 секунд"
+}
+
+start() {
+    if [ -f "$RUN/active" ]; then
+        echo "вход уже открыт: port-forward на 6080 и http://localhost:6080/vnc.html"
+        exit 0
+    fi
+    mkdir -p "$RUN"
+    : > "$RUN/active"
+
+    setsid Xvfb "$DISPLAY_NUM" -screen 0 1280x800x24 -nolisten tcp >"$RUN/xvfb.log" 2>&1 &
+    echo $! > "$RUN/xvfb.pid"
+    i=0
+    while [ ! -S "/tmp/.X11-unix/X${DISPLAY_NUM#:}" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+
+    setsid x11vnc -display "$DISPLAY_NUM" -localhost -nopw -forever -shared -rfbport 5900 -quiet \
+        >"$RUN/x11vnc.log" 2>&1 &
+    echo $! > "$RUN/x11vnc.pid"
+
+    setsid websockify --web /usr/share/novnc 127.0.0.1:6080 127.0.0.1:5900 >"$RUN/websockify.log" 2>&1 &
+    echo $! > "$RUN/websockify.pid"
+
+    APPDIR=/opt/creator DISPLAY="$DISPLAY_NUM" setsid /opt/creator/AppRun --no-sandbox --disable-dev-shm-usage --disable-gpu \
+        >"$RUN/creator.log" 2>&1 &
+    echo $! > "$RUN/creator.pid"
+
+    echo "вход открыт. дальше:"
+    echo "  kubectl -n whitelist-bypass port-forward pod/$(hostname) 6080"
+    echo "  http://localhost:6080/vnc.html"
+    echo "после входа: kubectl -n whitelist-bypass exec $(hostname) -- wlb-login stop"
+}
+
+case "${1:-start}" in
+    start) start ;;
+    stop) stop ;;
+    *) echo "usage: wlb-login [start|stop]" >&2; exit 2 ;;
+esac
