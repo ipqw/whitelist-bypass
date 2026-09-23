@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -51,6 +52,7 @@ const (
 type config struct {
 	binsDir, cookiesDir, roomsDir, loginFlag string
 	upstreamSocks, resources                 string
+	allowPrivateDst                          bool
 }
 
 // runner держит один creator одной платформы.
@@ -131,6 +133,11 @@ func (r *runner) runOnce(ctx context.Context) error {
 	}
 	if r.cfg.upstreamSocks != "" {
 		args = append(args, "--upstream-socks", r.cfg.upstreamSocks)
+	}
+	// с апстрима v0.4.0 creator без этого флага не пускает joiner'а на частные
+	// адреса — в том числе в wg-сеть
+	if r.cfg.allowPrivateDst {
+		args = append(args, "--allow-private-dst")
 	}
 	args = append(args, r.p.extra...)
 
@@ -331,6 +338,21 @@ func env(key, def string) string {
 	return def
 }
 
+// envBool понимает всё, что strconv.ParseBool: "1", "true", "0", "false"…
+// Непонятное значение — false, но с предупреждением в логе, а не молча.
+func envBool(key string) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return false
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		log.Printf("%s=%q — не булево значение, считаю false", key, v)
+		return false
+	}
+	return b
+}
+
 func main() {
 	log.SetFlags(log.LstdFlags)
 	home := env("HOME", "/data")
@@ -342,6 +364,7 @@ func main() {
 	flag.StringVar(&cfg.loginFlag, "login-flag", "/tmp/wlb-login/active", "файл-флаг: идёт вход через wlb-login")
 	flag.StringVar(&cfg.upstreamSocks, "upstream-socks", os.Getenv("UPSTREAM_SOCKS"), "SOCKS5 выхода для трафика туннеля")
 	flag.StringVar(&cfg.resources, "resources", env("RESOURCES", "default"), "режим ресурсов creator'ов")
+	flag.BoolVar(&cfg.allowPrivateDst, "allow-private-dst", envBool("ALLOW_PRIVATE_DST"), "пускать joiner'а на частные адреса (10/8, 172.16/12, 192.168/16, 100.64/10)")
 	flag.Parse()
 
 	for _, d := range []string{cfg.cookiesDir, cfg.roomsDir} {
@@ -374,7 +397,7 @@ func main() {
 			log.Fatalf("http: %v", err)
 		}
 	}()
-	log.Printf("wlb-agent: listen=%s cookies=%s upstream=%q", *listen, cfg.cookiesDir, cfg.upstreamSocks)
+	log.Printf("wlb-agent: listen=%s cookies=%s upstream=%q allow-private-dst=%v", *listen, cfg.cookiesDir, cfg.upstreamSocks, cfg.allowPrivateDst)
 
 	<-ctx.Done()
 	log.Printf("wlb-agent: остановка")
